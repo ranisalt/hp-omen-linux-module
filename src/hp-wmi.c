@@ -704,7 +704,7 @@ static ssize_t display_show(struct device *dev, struct device_attribute *attr,
 
 	if (value < 0)
 		return value;
-	return sprintf(buf, "%d\n", value);
+	return sysfs_emit(buf, "%d\n", value);
 }
 
 static ssize_t hddtemp_show(struct device *dev, struct device_attribute *attr,
@@ -714,7 +714,7 @@ static ssize_t hddtemp_show(struct device *dev, struct device_attribute *attr,
 
 	if (value < 0)
 		return value;
-	return sprintf(buf, "%d\n", value);
+	return sysfs_emit(buf, "%d\n", value);
 }
 
 static ssize_t als_show(struct device *dev, struct device_attribute *attr,
@@ -724,7 +724,7 @@ static ssize_t als_show(struct device *dev, struct device_attribute *attr,
 
 	if (value < 0)
 		return value;
-	return sprintf(buf, "%d\n", value);
+	return sysfs_emit(buf, "%d\n", value);
 }
 
 static ssize_t dock_show(struct device *dev, struct device_attribute *attr,
@@ -734,7 +734,7 @@ static ssize_t dock_show(struct device *dev, struct device_attribute *attr,
 
 	if (value < 0)
 		return value;
-	return sprintf(buf, "%d\n", value);
+	return sysfs_emit(buf, "%d\n", value);
 }
 
 static ssize_t tablet_show(struct device *dev, struct device_attribute *attr,
@@ -744,7 +744,7 @@ static ssize_t tablet_show(struct device *dev, struct device_attribute *attr,
 
 	if (value < 0)
 		return value;
-	return sprintf(buf, "%d\n", value);
+	return sysfs_emit(buf, "%d\n", value);
 }
 
 static ssize_t postcode_show(struct device *dev, struct device_attribute *attr,
@@ -755,7 +755,7 @@ static ssize_t postcode_show(struct device *dev, struct device_attribute *attr,
 
 	if (value < 0)
 		return value;
-	return sprintf(buf, "0x%x\n", value);
+	return sysfs_emit(buf, "0x%x\n", value);
 }
 
 static ssize_t als_store(struct device *dev, struct device_attribute *attr,
