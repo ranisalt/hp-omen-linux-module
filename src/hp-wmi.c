@@ -22,6 +22,7 @@
 #include <linux/slab.h>
 #include <linux/types.h>
 #include <linux/input.h>
+#include <linux/input-event-codes.h>
 #include <linux/input/sparse-keymap.h>
 #include <linux/platform_device.h>
 #include <linux/platform_profile.h>
@@ -182,6 +183,8 @@ struct victus_gpu_power_modes {
 
 enum hp_wmi_gm_commandtype {
 	HPWMI_FAN_SPEED_GET_QUERY		= 0x11,
+	HPWMI_MACRO_PROFILE_SET			= 0x0F,
+	HPWMI_MACRO_MODE_SET			= 0x17,
 	HPWMI_SET_PERFORMANCE_MODE		= 0x1A,
 	HPWMI_FAN_SPEED_MAX_GET_QUERY		= 0x26,
 	HPWMI_FAN_SPEED_MAX_SET_QUERY		= 0x27,
@@ -2210,6 +2213,75 @@ static int thermal_profile_setup(struct platform_device *device)
 	return 0;
 }
 
+/*
+ * Macro key support for HP Omen P1-P6 keys
+ */
+
+#define MACRO_KEY_RELEASE 0x80
+
+static u8 macro_profile_bytes[4096] = {
+	/* P1 */	0x03, KEY_KP1, KEY_KP1 | MACRO_KEY_RELEASE,
+	/* P2 */	0x03, KEY_KP2, KEY_KP2 | MACRO_KEY_RELEASE,
+	/* P3 */	0x03, KEY_KP3, KEY_KP3 | MACRO_KEY_RELEASE,
+	/* P4 */	0x03, KEY_KP4, KEY_KP4 | MACRO_KEY_RELEASE,
+	/* P5 */	0x03, KEY_KP5, KEY_KP5 | MACRO_KEY_RELEASE,
+	/* P6 */	0x03, KEY_KP6, KEY_KP6 | MACRO_KEY_RELEASE,
+
+	/* Ctrl+P1 */	0x05, KEY_LEFTCTRL, KEY_KP1, KEY_KP1 | MACRO_KEY_RELEASE, KEY_LEFTCTRL | MACRO_KEY_RELEASE,
+	/* Ctrl+P2 */	0x05, KEY_LEFTCTRL, KEY_KP2, KEY_KP2 | MACRO_KEY_RELEASE, KEY_LEFTCTRL | MACRO_KEY_RELEASE,
+	/* Ctrl+P3 */	0x05, KEY_LEFTCTRL, KEY_KP3, KEY_KP3 | MACRO_KEY_RELEASE, KEY_LEFTCTRL | MACRO_KEY_RELEASE,
+	/* Ctrl+P4 */	0x05, KEY_LEFTCTRL, KEY_KP4, KEY_KP4 | MACRO_KEY_RELEASE, KEY_LEFTCTRL | MACRO_KEY_RELEASE,
+	/* Ctrl+P5 */	0x05, KEY_LEFTCTRL, KEY_KP5, KEY_KP5 | MACRO_KEY_RELEASE, KEY_LEFTCTRL | MACRO_KEY_RELEASE,
+	/* Ctrl+P6 */	0x05, KEY_LEFTCTRL, KEY_KP6, KEY_KP6 | MACRO_KEY_RELEASE, KEY_LEFTCTRL | MACRO_KEY_RELEASE,
+
+	/* Alt+P1 */	0x05, KEY_LEFTALT, KEY_KP1, KEY_KP1 | MACRO_KEY_RELEASE, KEY_LEFTALT | MACRO_KEY_RELEASE,
+	/* Alt+P2 */	0x05, KEY_LEFTALT, KEY_KP2, KEY_KP2 | MACRO_KEY_RELEASE, KEY_LEFTALT | MACRO_KEY_RELEASE,
+	/* Alt+P3 */	0x05, KEY_LEFTALT, KEY_KP3, KEY_KP3 | MACRO_KEY_RELEASE, KEY_LEFTALT | MACRO_KEY_RELEASE,
+	/* Alt+P4 */	0x05, KEY_LEFTALT, KEY_KP4, KEY_KP4 | MACRO_KEY_RELEASE, KEY_LEFTALT | MACRO_KEY_RELEASE,
+	/* Alt+P5 */	0x05, KEY_LEFTALT, KEY_KP5, KEY_KP5 | MACRO_KEY_RELEASE, KEY_LEFTALT | MACRO_KEY_RELEASE,
+	/* Alt+P6 */	0x05, KEY_LEFTALT, KEY_KP6, KEY_KP6 | MACRO_KEY_RELEASE, KEY_LEFTALT | MACRO_KEY_RELEASE,
+
+	/* Shift+P1 */	0x05, KEY_LEFTSHIFT, KEY_KP1, KEY_KP1 | MACRO_KEY_RELEASE, KEY_LEFTSHIFT | MACRO_KEY_RELEASE,
+	/* Shift+P2 */	0x05, KEY_LEFTSHIFT, KEY_KP2, KEY_KP2 | MACRO_KEY_RELEASE, KEY_LEFTSHIFT | MACRO_KEY_RELEASE,
+	/* Shift+P3 */	0x05, KEY_LEFTSHIFT, KEY_KP3, KEY_KP3 | MACRO_KEY_RELEASE, KEY_LEFTSHIFT | MACRO_KEY_RELEASE,
+	/* Shift+P4 */	0x05, KEY_LEFTSHIFT, KEY_KP4, KEY_KP4 | MACRO_KEY_RELEASE, KEY_LEFTSHIFT | MACRO_KEY_RELEASE,
+	/* Shift+P5 */	0x05, KEY_LEFTSHIFT, KEY_KP5, KEY_KP5 | MACRO_KEY_RELEASE, KEY_LEFTSHIFT | MACRO_KEY_RELEASE,
+	/* Shift+P6 */	0x05, KEY_LEFTSHIFT, KEY_KP6, KEY_KP6 | MACRO_KEY_RELEASE, KEY_LEFTSHIFT | MACRO_KEY_RELEASE,
+
+	/* Fn+P1 */	0x03, KEY_KP7, KEY_KP7 | MACRO_KEY_RELEASE,
+	/* Fn+P2 */	0x03, KEY_KP8, KEY_KP8 | MACRO_KEY_RELEASE,
+	/* Fn+P3 */	0x03, KEY_KP9, KEY_KP9 | MACRO_KEY_RELEASE,
+	/* Fn+P4 */	0x03, KEY_KP0, KEY_KP0 | MACRO_KEY_RELEASE,
+	/* Fn+P5 */	0x03, KEY_KPMINUS, KEY_KPMINUS | MACRO_KEY_RELEASE,
+	/* Fn+P6 */	0x03, KEY_KPPLUS, KEY_KPPLUS | MACRO_KEY_RELEASE,
+};
+
+static int macro_key_setup(struct platform_device *dev)
+{
+	int ret;
+	u32 macro_enable = 1;
+
+	ret = hp_wmi_perform_query(HPWMI_MACRO_PROFILE_SET, HPWMI_GM,
+				   macro_profile_bytes, sizeof(macro_profile_bytes), 0);
+	pr_debug("macro key setup ret 0x%x\n", ret);
+
+	ret = hp_wmi_perform_query(HPWMI_MACRO_MODE_SET, HPWMI_GM,
+				   &macro_enable, sizeof(macro_enable), 0);
+	pr_debug("macro key enable ret 0x%x\n", ret);
+
+	return 0;
+}
+
+static void macro_key_remove(struct platform_device *dev)
+{
+	int ret;
+	u32 macro_disable = 0;
+
+	ret = hp_wmi_perform_query(HPWMI_MACRO_MODE_SET, HPWMI_GM,
+				   &macro_disable, sizeof(macro_disable), 0);
+	pr_debug("macro key disable ret 0x%x\n", ret);
+}
+
 static int hp_wmi_hwmon_init(void);
 
 static int __init hp_wmi_bios_setup(struct platform_device *device)
@@ -2241,6 +2313,8 @@ static int __init hp_wmi_bios_setup(struct platform_device *device)
 
 	thermal_profile_setup(device);
 
+	macro_key_setup(device);
+
 	return 0;
 }
 
@@ -2265,6 +2339,8 @@ static void __exit hp_wmi_bios_remove(struct platform_device *device)
 		rfkill_unregister(wwan_rfkill);
 		rfkill_destroy(wwan_rfkill);
 	}
+
+	macro_key_remove(device);
 }
 
 static int hp_wmi_resume_handler(struct device *device)
