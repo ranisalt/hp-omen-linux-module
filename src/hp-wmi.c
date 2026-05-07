@@ -350,6 +350,29 @@ static const char * const tablet_chassis_types[] = {
 };
 
 #define DEVICE_MODE_TABLET	0x06
+#define HPWMI_MANUAL_FAN_MIN_RPM	2600
+#define HPWMI_MANUAL_FAN1_MAX_RPM	5800
+#define HPWMI_MANUAL_FAN2_MAX_RPM	6100
+#define HPWMI_FAN_COUNT		2
+#define HPWMI_CPU_FAN		0
+#define HPWMI_GPU_FAN		1
+
+enum hp_wmi_pwm_mode {
+	HPWMI_PWM_MAX = 0,
+	HPWMI_PWM_MANUAL = 1,
+	HPWMI_PWM_AUTO = 2,
+};
+
+struct hp_wmi_hwmon_priv {
+	u16 target_rpm[HPWMI_FAN_COUNT];
+	u16 max_rpm[HPWMI_FAN_COUNT];
+	enum hp_wmi_pwm_mode fan_mode;
+};
+
+static bool force_manual_fan_control;
+module_param(force_manual_fan_control, bool, 0644);
+MODULE_PARM_DESC(force_manual_fan_control,
+		 "Expose experimental fan_target manual fan control");
 
 /* Determine featureset for specific models */
 struct quirk_entry {
@@ -686,6 +709,92 @@ static int hp_wmi_fan_speed_max_get(void)
 		return ret < 0 ? ret : -EINVAL;
 
 	return val;
+}
+
+static bool is_victus_s_thermal_profile(void);
+
+static bool hp_wmi_manual_fan_control_available(void)
+{
+	const char *board_name = dmi_get_system_info(DMI_BOARD_NAME);
+
+	if (force_manual_fan_control)
+		return true;
+
+	/* Tested locally for the Victus by HP Gaming Laptop 15-fb0xxx. */
+	return board_name && !strcmp(board_name, "8A3D");
+}
+
+static u16 hp_wmi_fan_max_rpm(int fan)
+{
+	if (fan == HPWMI_CPU_FAN)
+		return HPWMI_MANUAL_FAN1_MAX_RPM;
+
+	return HPWMI_MANUAL_FAN2_MAX_RPM;
+}
+
+static u16 hp_wmi_clamp_fan_target(int fan, long rpm)
+{
+	u16 max_rpm = hp_wmi_fan_max_rpm(fan);
+
+	if (rpm < HPWMI_MANUAL_FAN_MIN_RPM)
+		return HPWMI_MANUAL_FAN_MIN_RPM;
+	if (rpm > max_rpm)
+		return max_rpm;
+
+	return rpm;
+}
+
+static int hp_wmi_fan_speed_set_targets(struct hp_wmi_hwmon_priv *priv)
+{
+	u8 fan_speed[HPWMI_FAN_COUNT];
+	int ret;
+
+	fan_speed[HPWMI_CPU_FAN] = DIV_ROUND_CLOSEST(priv->target_rpm[HPWMI_CPU_FAN], 100);
+	fan_speed[HPWMI_GPU_FAN] = DIV_ROUND_CLOSEST(priv->target_rpm[HPWMI_GPU_FAN], 100);
+
+	ret = hp_wmi_get_fan_count_userdefine_trigger();
+	if (ret < 0)
+		return ret;
+
+	ret = hp_wmi_fan_speed_max_set(0);
+	if (ret < 0)
+		return ret;
+
+	ret = hp_wmi_perform_query(HPWMI_FAN_SPEED_SET_QUERY, HPWMI_GM,
+				   &fan_speed, sizeof(fan_speed), 0);
+	if (ret)
+		return ret < 0 ? ret : -EINVAL;
+
+	priv->fan_mode = HPWMI_PWM_MANUAL;
+	return 0;
+}
+
+static int hp_wmi_apply_manual_fan_target(struct hp_wmi_hwmon_priv *priv,
+					  int fan, long rpm)
+{
+	if (!hp_wmi_manual_fan_control_available())
+		return -EOPNOTSUPP;
+	if (fan < 0 || fan >= HPWMI_FAN_COUNT)
+		return -EINVAL;
+
+	priv->target_rpm[fan] = hp_wmi_clamp_fan_target(fan, rpm);
+	return hp_wmi_fan_speed_set_targets(priv);
+}
+
+static void hp_wmi_hwmon_init_manual_targets(struct hp_wmi_hwmon_priv *priv)
+{
+	int fan, rpm;
+
+	priv->fan_mode = HPWMI_PWM_AUTO;
+
+	for (fan = 0; fan < HPWMI_FAN_COUNT; fan++) {
+		priv->max_rpm[fan] = hp_wmi_fan_max_rpm(fan);
+		if (is_victus_s_thermal_profile())
+			rpm = hp_wmi_get_fan_speed_victus_s(fan);
+		else
+			rpm = hp_wmi_get_fan_speed(fan);
+		priv->target_rpm[fan] = hp_wmi_clamp_fan_target(fan, rpm);
+	}
 }
 
 static int __init hp_wmi_bios_2008_later(void)
@@ -2332,6 +2441,16 @@ static umode_t hp_wmi_hwmon_is_visible(const void *data,
 	case hwmon_pwm:
 		return 0644;
 	case hwmon_fan:
+		switch (attr) {
+		case hwmon_fan_input:
+			break;
+		case hwmon_fan_target:
+			return hp_wmi_manual_fan_control_available() ? 0644 : 0;
+		case hwmon_fan_max:
+			return hp_wmi_manual_fan_control_available() ? 0444 : 0;
+		default:
+			return 0;
+		}
 		if (is_victus_s_thermal_profile()) {
 			if (hp_wmi_get_fan_speed_victus_s(channel) >= 0)
 				return 0444;
@@ -2350,10 +2469,27 @@ static umode_t hp_wmi_hwmon_is_visible(const void *data,
 static int hp_wmi_hwmon_read(struct device *dev, enum hwmon_sensor_types type,
 			     u32 attr, int channel, long *val)
 {
+	struct hp_wmi_hwmon_priv *priv = dev_get_drvdata(dev);
 	int ret;
 
 	switch (type) {
 	case hwmon_fan:
+		switch (attr) {
+		case hwmon_fan_input:
+			break;
+		case hwmon_fan_target:
+			if (!hp_wmi_manual_fan_control_available())
+				return -EOPNOTSUPP;
+			*val = priv->target_rpm[channel];
+			return 0;
+		case hwmon_fan_max:
+			if (!hp_wmi_manual_fan_control_available())
+				return -EOPNOTSUPP;
+			*val = priv->max_rpm[channel];
+			return 0;
+		default:
+			return -EOPNOTSUPP;
+		}
 		if (is_victus_s_thermal_profile())
 			ret = hp_wmi_get_fan_speed_victus_s(channel);
 		else
@@ -2363,16 +2499,23 @@ static int hp_wmi_hwmon_read(struct device *dev, enum hwmon_sensor_types type,
 		*val = ret;
 		return 0;
 	case hwmon_pwm:
+		if (hp_wmi_manual_fan_control_available() &&
+		    priv->fan_mode == HPWMI_PWM_MANUAL) {
+			*val = HPWMI_PWM_MANUAL;
+			return 0;
+		}
 		switch (hp_wmi_fan_speed_max_get()) {
 		case 0:
 			/* 0 is automatic fan, which is 2 for hwmon */
-			*val = 2;
+			priv->fan_mode = HPWMI_PWM_AUTO;
+			*val = HPWMI_PWM_AUTO;
 			return 0;
 		case 1:
 			/* 1 is max fan, which is 0
 			 * (no fan speed control) for hwmon
 			 */
-			*val = 0;
+			priv->fan_mode = HPWMI_PWM_MAX;
+			*val = HPWMI_PWM_MAX;
 			return 0;
 		default:
 			/* shouldn't happen */
@@ -2386,21 +2529,40 @@ static int hp_wmi_hwmon_read(struct device *dev, enum hwmon_sensor_types type,
 static int hp_wmi_hwmon_write(struct device *dev, enum hwmon_sensor_types type,
 			      u32 attr, int channel, long val)
 {
+	struct hp_wmi_hwmon_priv *priv = dev_get_drvdata(dev);
+	int ret;
+
 	switch (type) {
+	case hwmon_fan:
+		if (attr != hwmon_fan_target)
+			return -EOPNOTSUPP;
+
+		return hp_wmi_apply_manual_fan_target(priv, channel, val);
 	case hwmon_pwm:
 		switch (val) {
 		case 0:
 			if (is_victus_s_thermal_profile())
 				hp_wmi_get_fan_count_userdefine_trigger();
 			/* 0 is no fan speed control (max), which is 1 for us */
-			return hp_wmi_fan_speed_max_set(1);
+			ret = hp_wmi_fan_speed_max_set(1);
+			if (!ret)
+				priv->fan_mode = HPWMI_PWM_MAX;
+			return ret;
+		case 1:
+			if (!hp_wmi_manual_fan_control_available())
+				return -EOPNOTSUPP;
+			return hp_wmi_fan_speed_set_targets(priv);
 		case 2:
 			/* 2 is automatic speed control, which is 0 for us */
 			if (is_victus_s_thermal_profile()) {
 				hp_wmi_get_fan_count_userdefine_trigger();
-				return hp_wmi_fan_speed_max_reset();
-			} else
-				return hp_wmi_fan_speed_max_set(0);
+				ret = hp_wmi_fan_speed_max_reset();
+			} else {
+				ret = hp_wmi_fan_speed_max_set(0);
+			}
+			if (!ret)
+				priv->fan_mode = HPWMI_PWM_AUTO;
+			return ret;
 		default:
 			/* we don't support manual fan speed control */
 			return -EINVAL;
@@ -2411,7 +2573,9 @@ static int hp_wmi_hwmon_write(struct device *dev, enum hwmon_sensor_types type,
 }
 
 static const struct hwmon_channel_info * const info[] = {
-	HWMON_CHANNEL_INFO(fan, HWMON_F_INPUT, HWMON_F_INPUT),
+	HWMON_CHANNEL_INFO(fan,
+			   HWMON_F_INPUT | HWMON_F_TARGET | HWMON_F_MAX,
+			   HWMON_F_INPUT | HWMON_F_TARGET | HWMON_F_MAX),
 	HWMON_CHANNEL_INFO(pwm, HWMON_PWM_ENABLE),
 	NULL
 };
@@ -2430,9 +2594,16 @@ static const struct hwmon_chip_info chip_info = {
 static int hp_wmi_hwmon_init(void)
 {
 	struct device *dev = &hp_wmi_platform_dev->dev;
+	struct hp_wmi_hwmon_priv *priv;
 	struct device *hwmon;
 
-	hwmon = devm_hwmon_device_register_with_info(dev, "hp", &hp_wmi_driver,
+	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
+	if (!priv)
+		return -ENOMEM;
+
+	hp_wmi_hwmon_init_manual_targets(priv);
+
+	hwmon = devm_hwmon_device_register_with_info(dev, "hp", priv,
 						     &chip_info, NULL);
 
 	if (IS_ERR(hwmon)) {
